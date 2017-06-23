@@ -15,6 +15,39 @@
 
 #include <sys/fanotify.h>
 
+#if 0
+#define	DP(X)	do { debugset(__FILE__, __LINE__, __FUNCTION__); debugprintf X; } while (0)
+static void
+debugset(const char *file, int line, const char *fn)
+{
+  fprintf(stderr, "[[%s:%d:%s", file, line, fn);
+}
+static void
+debugprintf(const char *s, ...)
+{
+  va_list	list;
+
+  va_start(list, s);
+  vfprintf(stderr, s, list);
+  va_end(list);
+  fprintf(stderr, "]]\n");
+  fflush(stderr);
+}
+#else
+#define	DP(X)	xDP(X)
+#endif
+#define	xDP(X)	do { ; } while (0)
+
+enum
+  {
+    SYNTHETIC_CWD = 1,
+    SYNTHETIC_CMD,
+    SYNTHETIC_PPID,
+    SYNTHETIC_TIME,
+    SYNTHETIC_ALLOW,
+    SYNTHETIC_UNKNOWN,
+  };
+
 #define	MODES_ALL	(FAN_ACCESS|FAN_OPEN|FAN_MODIFY|FAN_CLOSE_WRITE|FAN_CLOSE_NOWRITE)
 #define	PERMS_ALL	(FAN_OPEN_PERM|FAN_ACCESS_PERM)
 
@@ -31,20 +64,30 @@ static struct _modes
     { "CLOSE_W", 	0, FAN_CLOSE_WRITE,	},
     { "CLOSE_R", 	0, FAN_CLOSE_NOWRITE,	},
     { "OVERFLOW",	0, FAN_Q_OVERFLOW	},
-    { "CWD",		1 },
-    { "PROC",		2 },
-    { "PPID",		3 },
+    { "CMD",		SYNTHETIC_CMD },
+    { "CWD",		SYNTHETIC_CWD },
+    { "PPID",		SYNTHETIC_PPID },
+    { "TIME",		SYNTHETIC_TIME },
+    { "ALLOW",		SYNTHETIC_ALLOW },
+    { "UNKNOWN",	SYNTHETIC_UNKNOWN },
     { 0 }
   };
 
 static int	mode_disable, perm_disable, synth_disable;
 static unsigned	pid_max;
-static unsigned char	*pids;
 static unsigned	flags;
 static int	fa = -1;
 static const char *arg0;
 
-#define	FLAG_ALL			0x81ff
+#define	PID_IGNORED	((struct _pids *)1)
+
+static struct _pids
+  {
+    unsigned	count;
+    unsigned	ppid;
+    const char	*cwd, *cmd;
+    unsigned long long	start;
+  }	**pids;
 
 struct usage
   {
@@ -74,8 +117,13 @@ struct usage
     { "unlimited number of monitors",			FLAG_FAN_UNLIMITED_MARKS },
 #define	FLAG_FOLLOW_LINKS				0x0100
     { "follow softlinks on arguments",			FLAG_FOLLOW_LINKS },
+#define	FLAG_NO_QUOTE					0x0200
+    { "do not quote 3rd column",			FLAG_NO_QUOTE },
+#define	FLAG_HUMAN					0x0400
+    { "output empty separation lines (for humans)",	FLAG_HUMAN },
 #define	FLAG_DEBUG					0x8000
     { "enable debugging (skips some errors)",		FLAG_DEBUG },
+#define	FLAG_ALL					0x87ff
     { 0 }
   }, *usg = usages;
 
@@ -129,10 +177,39 @@ alloc(size_t len)
     len = 1;
   ptr = malloc(len);
   if (!ptr)
-    FATAL("Out of memory");
+    FATAL("out of memory");
   memset(ptr, 0, len);
   return ptr;
 }
+
+static void
+myfree(const void *ptr)
+{
+  if (ptr)
+    free((void *)ptr);
+}
+
+static void *
+shrinkalloc(void *ptr, size_t len)
+{
+  void	*ret;
+
+  ret = realloc(ptr, len);
+  return ret ? ret : ptr;
+}
+
+#if 0
+static const char *
+mystrdup(const char *s)
+{
+  const char	*ret;
+
+  ret	= strdup(s);
+  if (!ret)
+    FATAL("out of memory");
+  return ret;
+}
+#endif
 
 #define	DESPARATE(X)	int ret, loops; for (loops=100000; --loops>=0 && (ret=(X))<0 && errno==EINTR; ); return ret;
 
@@ -156,19 +233,19 @@ static void mywrite(int fd, const void *ptr, size_t max)
 }
 
 static char *
-readin(char *buf, size_t max, const char *name)
+myreadin(char *buf, size_t max, const char *name)
 {
   int fd, got;
 
   if ((fd = open(name, O_RDONLY))<0)
-    FATAL("cannot open %s", name);
+    return 0;
   for (got=0; got<max; )
     {
       int len;
 
       len = myread(fd, buf+got, max-got);
       if (len<0)
-        FATAL("cannot read %s", name);
+	return 0;
       if (len)
 	{
 	  got += len;
@@ -176,10 +253,52 @@ readin(char *buf, size_t max, const char *name)
 	}
       buf[got] = 0;
       if (myclose(fd))
-	FATAL("cannot close %s", name);
+	return 0;
       return buf;
     }
-  FATAL("buffer too small to read %s", name);
+  OOPS("buffer too small to read %s", name);
+  return 0;
+}
+
+static char *
+readin(char *buf, size_t max, const char *name)
+{
+  if (!myreadin(buf, max, name))
+    FATAL("cannot read %s", name);
+  return buf;
+}
+
+static char *
+myreadlink(const char *link)
+{
+  static int	size = PATH_MAX;	/* adapt to workload	*/
+  int		i;
+
+  for (i=5; --i;)
+    {
+      struct stat	st;
+      ssize_t		ok;
+      char		*buf;
+
+      buf	= alloc(size);
+      ok	= readlink(link, buf, size);
+      if (ok<0)
+	{
+	  myfree(buf);
+          return 0;
+	}
+      if (ok<size)
+        {
+	  buf[ok]	= 0;
+	  return shrinkalloc(buf, ok+1);
+        }
+      myfree(buf);
+      if (lstat(link, &st))
+        return 0;
+
+      size = PATH_MAX + st.st_size;
+    }
+  OOPS("weird link size: %s", link);
   return 0;
 }
 
@@ -221,6 +340,74 @@ ul2u(unsigned long ul)
   if (ul-u)
     FATAL("%lu does not fit in data type", ul);
   return u;
+}
+
+static const char *
+myvsnprintf(char *buf, size_t max, const char *format, va_list olist)
+{
+  static int	size = PATH_MAX;	/* adapt to workload	*/
+  va_list	list;
+
+  if (buf)
+    {
+      int	len;
+
+      va_copy(list, olist);
+      len = vsnprintf(buf, max, format, list);
+      va_end(list);
+      if (len<0 || len>=max-1 /* be sure in case NUL is not counted */)
+        FATAL("buffer of size %llu too small for format: %s", (unsigned long long)max, format);
+      return buf;
+    }
+
+  if (max<PATH_MAX)
+    max	= PATH_MAX;
+  for (;;)
+    {
+      int	len;
+
+      buf	= alloc(size);
+
+      va_copy(list, olist);
+      len = vsnprintf(buf, max, format, list);
+      va_end(list);
+      
+      if (len<0)
+	FATAL("sprintf failed for format %s", format);
+      if (len<size-1)
+	return shrinkalloc(buf, len+1);
+
+      size += max;
+    }
+}
+
+static const char *
+mysnprintf(char *buf, size_t max, const char *format, ...)
+{
+  va_list	list;
+  const char	*ret;
+
+  va_start(list, format);
+  ret	= myvsnprintf(buf, max, format, list);
+  va_end(list);
+  return ret;
+}
+
+static void
+str_set(const char **str, const char *val)
+{
+  if (*str)
+    myfree(*str);
+  *str = val;
+}
+
+static void
+proc_reset(struct _pids *p)
+{
+  str_set(&p->cwd, NULL);
+  str_set(&p->cmd, NULL);
+  p->ppid	= 0;
+  p->count	= 0;
 }
 
 static unsigned
@@ -265,7 +452,7 @@ endis(const char *event, int enable)
         fprintf(stderr, "\t%s", m->name);
       fprintf(stderr, "\n\tFlags values (do logical or to set more than one):\n");
       for (; usg->desc; usg++)
-        fprintf(stderr, "\t+%d\t%s\n", usg->flag, usg->desc);
+        fprintf(stderr, "\t%+7d\t%#7x\t%s\n", usg->flag, usg->flag, usg->desc);
       usg = 0;
     }
   OOPS("cannot %s unknown event '%s'", enable ? "enable" : "disable", event);
@@ -318,12 +505,12 @@ ignorepid(unsigned long pid)
   if (!pids)
     {
       pid_max	= get_pid_max();
-      pids	= alloc(pid_max);
+      pids	= alloc(pid_max * sizeof *pids);
     }
   if (pid>=pid_max)
     OOPS("process id %lu out of bounds, max is %u", pid, pid_max);
   else
-    pids[pid] = 2;
+    pids[pid] = PID_IGNORED;
 }
 
 static int
@@ -388,28 +575,205 @@ options(const char * const *ptr)
 }
 
 static void
-print_event(int mask, const char *event, const struct fanotify_event_metadata *ptr, const char *name)
+escape(const char *s)
 {
+  int	spc;
+  char	c;
+
+  spc	= 0;
+  for (;;)
+    {
+      switch (c = *s++)
+        {
+        case 0:
+  	  while (spc--)
+  	    printf("\\40");
+	  return;
+
+	case ' ':
+	  spc++;
+	  continue;
+	}
+
+      for (; spc; spc--)
+	putchar(' ');
+
+      switch (c)
+	{
+	case '\a':	c = 'a'; break;
+	case '\b':	c = 'b'; break;
+	case '\f':	c = 'f'; break;
+	case '\n':	c = 'n'; break;
+	case '\r':	c = 'r'; break;
+	case '\t':	c = 't'; break;
+	case '\v':	c = 'v'; break;
+	case '\\':	c = '\\'; break;
+
+	default:
+	  if (isprint(c))
+	    {
+	      putchar(c);
+	      continue;
+	    }
+	case '\'':	/* ANSI $'xxxx'	*/
+	  printf("\\x%02x", c);
+	  continue;
+        }
+      putchar('\\');
+      putchar(c);
+    }
+}
+
+static void
+vev(const char *ev, long pid, const char *s, va_list list)
+{
+  printf("%s\t%ld\t", ev, pid);
+  if (flags & FLAG_NO_QUOTE)
+    vprintf(s, list);
+  else
+    {
+      const char	*buf;
+
+      buf	= myvsnprintf(NULL, BUFSIZ, s, list);
+      escape(buf);
+      myfree(buf);
+    }
+  putchar('\n');
+}
+
+#if 0
+static void
+ev(const char *ev, long pid, const char *s, ...)
+{
+  va_list	list;
+
+  va_start(list, s);
+  vev(ev, pid, s, list);
+  va_end(list);
+}
+#endif
+
+static void
+verbose(const char *ev, long pid, const char *s, ...)
+{
+  va_list	list;
+
+  if (!(flags & FLAG_VERBOSE))
+    return;
+  va_start(list, s);
+  vev(ev, pid, s, list);
+  va_end(list);
+}
+
+static void
+print_event(int synthetic, int mask, const char *event, const struct fanotify_event_metadata *ptr, const char *name, ...)
+{
+  va_list	list;
+
+  if (!synthetic && !mask)
+    return;
   000; /* XXX TODO XXX: escapes, ignores, etc.	*/
-  printf("%s\t%ld\t%s\n", event, (long)ptr->pid, name);
+  va_start(list, name);
+  vev(event, (long)ptr->pid, name, list);
+  va_end(list);
+}
+
+static int
+synthetic_u(int synth, unsigned *var, unsigned val)
+{
+  if (*var==val)
+    return 0;
+  *var = val;
+  return synth;
+}
+
+static int
+synthetic_s(int synth, const char **var, const char *val_allocated)
+{
+  if (!val_allocated || (*var && !strcmp(*var, val_allocated)))
+    {
+      myfree(val_allocated);
+      return 0;
+    }
+  myfree(*var);
+  *var = val_allocated;
+  return synth;
+}
+
+static void
+emptyline(void)
+{
+  if (flags & FLAG_HUMAN)
+    putchar('\n');
+}
+
+static int
+synthetic(struct _pids *p, unsigned pid)
+{
+  char			tmp[PATH_MAX], buf[BUFSIZ], *s, *state;
+  unsigned long long	start;
+  int			ppid, ret;
+
+  xDP(("() pid=%u", pid));
+  ret	= 0;
+  if (!myreadin(buf, sizeof buf, mysnprintf(tmp, sizeof tmp, "/proc/%u/stat", pid)))
+    {
+      verbose("(OOPS)", pid, "cannot read %s", tmp);
+      proc_reset(p);
+      return 0;
+    }
+  /* WTF? /proc/self/stat's 2nd field (comm) can contain any character, like SPC or a faked /proc/self/stat line.
+   * Hunt for the last non-digit.  That's the start of the 3rd field (state)
+   */
+  state = 0;
+  for (s=buf; *s; s++)
+    switch (*s)
+      {
+      default:
+	state = s;
+
+      case ' ': case '-': case '\n':
+      case '0': case '1': case '2': case '3': case '4':
+      case '5': case '6': case '7': case '8': case '9':
+        break;
+      }
+  if (!state || 2 != sscanf(state, "%*c %d %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %*u %*d %*d %*d %*d %*d %*d %llu ", &ppid, &start))
+    {
+      OOPS("cannot parse %s: '%s'", tmp, state);
+      return 0;
+    }
+
+  if (p->start != start)
+    {
+      proc_reset(p);
+      p->start = start;
+      emptyline();
+      ret	|= SYNTHETIC_TIME;
+    }
+  else
+    p->count	= 10;	/* this is an arbitrary value, just ignore the next 10 events before checking again	*/
+
+  ret	|= synthetic_u(SYNTHETIC_PPID, &p->ppid, ppid);
+  ret	|= synthetic_s(SYNTHETIC_CMD,  &p->cmd,  myreadlink(mysnprintf(tmp, sizeof tmp, "/proc/%u/exe", pid)));
+  ret	|= synthetic_s(SYNTHETIC_CWD,  &p->cwd,  myreadlink(mysnprintf(tmp, sizeof tmp, "/proc/%u/cwd", pid)));
+
+  xDP(("() ret=%d", ret));
+  return ret;
 }
 
 static void
 print_events(const struct fanotify_event_metadata *ptr)
 {
   char		fdname[32], name[PATH_MAX];
-  int		len, have;
+  int		len, have, synth;
   unsigned	bits;
   struct _modes *m;
-
-  000;	/* XXX TODO XXX track PIDs	*/
+  struct _pids	*p;
 
   len	 = 0;
-
   if (ptr->fd>=0)
     {
-      snprintf(fdname, sizeof fdname, "%d", ptr->fd);
-      len	= readlink(fdname, name, (sizeof name)-1);
+      len	= readlink(mysnprintf(fdname, sizeof fdname, "%d", ptr->fd), name, (sizeof name)-1);
       if (len<0)
         {
           OOPS("cannot readlink %d", ptr->fd);
@@ -418,30 +782,51 @@ print_events(const struct fanotify_event_metadata *ptr)
     }
   name[len] = 0;
 
+  synth	= 0;
+  p	= 0;
+  if (ptr->pid>0 && ptr->pid<pid_max && PID_IGNORED != (p = pids[ptr->pid]))
+    {
+      if (!p)
+	p	= pids[ptr->pid]	= alloc(sizeof *p);
+      if (!p->count--)
+	synth	= synthetic(p, ptr->pid);
+    }
+
   if (ptr->mask & PERMS_ALL)
     {
       struct fanotify_response r;
  
       if (flags & FLAG_VERBOSE)
-        print_event(-1, "ALLOW", ptr, name);
+        print_event(SYNTHETIC_ALLOW, 0, "ALLOW", ptr, "%s", name);
       r.fd		= ptr->fd;
       r.response	= FAN_ALLOW;
       mywrite(fa, &r, sizeof r);
     }
 
-  if (ptr->pid>0 && ptr->pid<pid_max && pids[ptr->pid]>1)
+  if (p == PID_IGNORED)
     return;	/* ignored by PID	*/
+
+  if (synth)
+    {
+      print_event(synth&SYNTHETIC_CMD,  0, "CMD",  ptr, "%s", p->cmd);
+      print_event(synth&SYNTHETIC_CWD,  0, "CWD",  ptr, "%s", p->cwd);
+      print_event(synth&SYNTHETIC_PPID, 0, "PPID", ptr, "%u", p->ppid);
+      print_event(synth&SYNTHETIC_TIME, 0, "TIME", ptr, "%llu", p->start);
+    }
 
   have = 0;
   for (m=modes+1; m->name; m++)
     if ((bits=ptr->mask & (m->mode|m->perm))!=0)
       {
-        print_event(bits, m->name, ptr, name);
+        print_event(0, bits, m->name, ptr, "%s", name);
         have = 1;
       }
 
   if (!have)
-    print_event(MODES_ALL, "(UNKNOWN)", ptr, name);
+    print_event(SYNTHETIC_UNKNOWN, 0, "(UNKNOWN)", ptr, "%s", name);
+
+  if (flags & FLAG_UNBUFFERED && fflush(stdout))
+    FATAL("STDOUT went away");
 }
 
 static int
@@ -470,7 +855,7 @@ monitor(void)
 
       if (ptr->fd<0)
 	{
-          print_event(FAN_Q_OVERFLOW, "OVERFLOW", ptr, NULL);
+          print_event(0, FAN_Q_OVERFLOW, "OVERFLOW", ptr, NULL);
 	  continue;
 	}
       print_events(ptr);

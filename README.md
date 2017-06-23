@@ -1,4 +1,4 @@
-> **NOT COMPLETE, NOT TESTED, AND MISSING FEATURES**
+> **Some parts (flags, +-event) are still missing, nearly not tested, some options have bugs**
 
 
 # fanotifier
@@ -35,8 +35,8 @@ To run:
   - `64` unlimited queue.  Sets the `FAN_UNLIMITED_QUEUE` option
   - `128` unlimited marks.  Sets the `FAN_UNLIMITED_MARKS` option
   - `256` follow softlinks.  Do not use `FAN_MARK_DONT_FOLLOW`
-  - `512` (future use)
-  - `1024` (future use)
+  - `512` do not quote 3rd column (better human readable)
+  - `1024` output empty separation lines (better human readable)
   - `2048` (future use)
   - `4096` (future use)
   - `8192` (future use)
