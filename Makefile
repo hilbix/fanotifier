@@ -9,7 +9,7 @@ PREFIX=$(HOME)
 all:	$(TARG)
 
 gdb:	all
-	sudo gdb -ex run --args './$(TARG)' -0 /run/shm
+	sudo gdb -ex run --args './$(TARG)' -0
 
 install:
 	cp '$(TARG)' '$(PREFIX)/bin/$(TARG)'
