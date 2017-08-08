@@ -40,7 +40,7 @@ debugprintf(const char *s, ...)
 
 enum
   {
-    SYNTHETIC_CWD = 1,
+    SYNTHETIC_PWD = 1,
     SYNTHETIC_CMD,
     SYNTHETIC_PPID,
     SYNTHETIC_TIME,
@@ -65,7 +65,7 @@ static struct _modes
     { "CLOSE_R", 	0, FAN_CLOSE_NOWRITE,	},
     { "OVERFLOW",	0, FAN_Q_OVERFLOW	},
     { "CMD",		SYNTHETIC_CMD },
-    { "CWD",		SYNTHETIC_CWD },
+    { "PWD",		SYNTHETIC_PWD },
     { "PPID",		SYNTHETIC_PPID },
     { "TIME",		SYNTHETIC_TIME },
     { "ALLOW",		SYNTHETIC_ALLOW },
@@ -85,7 +85,7 @@ static struct _pids
   {
     unsigned	count;
     unsigned	ppid;
-    const char	*cwd, *cmd;
+    const char	*pwd, *cmd;
     unsigned long long	start;
   }	**pids;
 
@@ -404,7 +404,7 @@ str_set(const char **str, const char *val)
 static void
 proc_reset(struct _pids *p)
 {
-  str_set(&p->cwd, NULL);
+  str_set(&p->pwd, NULL);
   str_set(&p->cmd, NULL);
   p->ppid	= 0;
   p->count	= 0;
@@ -755,7 +755,7 @@ synthetic(struct _pids *p, unsigned pid)
 
   ret	|= synthetic_u(SYNTHETIC_PPID, &p->ppid, ppid);
   ret	|= synthetic_s(SYNTHETIC_CMD,  &p->cmd,  myreadlink(mysnprintf(tmp, sizeof tmp, "/proc/%u/exe", pid)));
-  ret	|= synthetic_s(SYNTHETIC_CWD,  &p->cwd,  myreadlink(mysnprintf(tmp, sizeof tmp, "/proc/%u/cwd", pid)));
+  ret	|= synthetic_s(SYNTHETIC_PWD,  &p->pwd,  myreadlink(mysnprintf(tmp, sizeof tmp, "/proc/%u/cwd", pid)));
 
   xDP(("() ret=%d", ret));
   return ret;
@@ -809,7 +809,7 @@ print_events(const struct fanotify_event_metadata *ptr)
   if (synth)
     {
       print_event(synth&SYNTHETIC_CMD,  0, "CMD",  ptr, "%s", p->cmd);
-      print_event(synth&SYNTHETIC_CWD,  0, "CWD",  ptr, "%s", p->cwd);
+      print_event(synth&SYNTHETIC_PWD,  0, "PWD",  ptr, "%s", p->pwd);
       print_event(synth&SYNTHETIC_PPID, 0, "PPID", ptr, "%u", p->ppid);
       print_event(synth&SYNTHETIC_TIME, 0, "TIME", ptr, "%llu", p->start);
     }
