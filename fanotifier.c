@@ -40,12 +40,13 @@ debugprintf(const char *s, ...)
 
 enum
   {
-    SYNTHETIC_PWD = 1,
-    SYNTHETIC_CMD,
-    SYNTHETIC_PPID,
-    SYNTHETIC_TIME,
-    SYNTHETIC_ALLOW,
-    SYNTHETIC_UNKNOWN,
+    SYNTHETIC_PWD	= 1,
+    SYNTHETIC_CMD	= 2,
+    SYNTHETIC_ARGS	= 4,
+    SYNTHETIC_PPID	= 8,
+    SYNTHETIC_TIME	= 16,
+    SYNTHETIC_ALLOW	= 32,
+    SYNTHETIC_UNKNOWN	= 64,
   };
 
 #define	MODES_ALL	(FAN_ACCESS|FAN_OPEN|FAN_MODIFY|FAN_CLOSE_WRITE|FAN_CLOSE_NOWRITE)
@@ -66,6 +67,7 @@ static struct _modes
     { "OVERFLOW",	0, FAN_Q_OVERFLOW	},
     { "CMD",		SYNTHETIC_CMD },
     { "PWD",		SYNTHETIC_PWD },
+    { "ARGS",		SYNTHETIC_ARGS },
     { "PPID",		SYNTHETIC_PPID },
     { "TIME",		SYNTHETIC_TIME },
     { "ALLOW",		SYNTHETIC_ALLOW },
@@ -85,7 +87,7 @@ static struct _pids
   {
     unsigned	count;
     unsigned	ppid;
-    const char	*pwd, *cmd;
+    const char	*pwd, *cmd, *args;
     unsigned long long	start;
   }	**pids;
 
@@ -143,7 +145,9 @@ vOOPS(int e, const char *s, va_list list, int nonfatal)
   if (nonfatal)
     return;
 
+#if 1
   exit(23);
+#endif
   abort();
   for(;;);
 }
@@ -169,24 +173,32 @@ FATAL(const char *s, ...)
 }
 
 static void *
-alloc(size_t len)
+re_alloc(void *ptr, size_t len)
 {
-  void *ptr;
-
   if (!len)
     len = 1;
-  ptr = malloc(len);
+  ptr = realloc(ptr, len);
   if (!ptr)
     FATAL("out of memory");
+  return ptr;
+}
+
+static void *
+alloc(size_t len)
+{
+  void	*ptr;
+
+  ptr	= re_alloc(NULL, len);
   memset(ptr, 0, len);
   return ptr;
 }
 
-static void
+static void *
 myfree(const void *ptr)
 {
   if (ptr)
     free((void *)ptr);
+  return 0;
 }
 
 static void *
@@ -194,22 +206,22 @@ shrinkalloc(void *ptr, size_t len)
 {
   void	*ret;
 
+  if (!len)
+    len	= 1;
   ret = realloc(ptr, len);
   return ret ? ret : ptr;
 }
 
-#if 0
-static const char *
+static char *
 mystrdup(const char *s)
 {
-  const char	*ret;
+  char	*ret;
 
   ret	= strdup(s);
   if (!ret)
     FATAL("out of memory");
   return ret;
 }
-#endif
 
 #define	DESPARATE(X)	int ret, loops; for (loops=100000; --loops>=0 && (ret=(X))<0 && errno==EINTR; ); return ret;
 
@@ -283,10 +295,7 @@ myreadlink(const char *link)
       buf	= alloc(size);
       ok	= readlink(link, buf, size);
       if (ok<0)
-	{
-	  myfree(buf);
-          return 0;
-	}
+	return myfree(buf);
       if (ok<size)
         {
 	  buf[ok]	= 0;
@@ -300,6 +309,88 @@ myreadlink(const char *link)
     }
   OOPS("weird link size: %s", link);
   return 0;
+}
+
+static char *
+readall(int fd, size_t *len)
+{
+  char		*buf;
+  size_t	max;
+  int		got;
+
+  *len	= 0;
+  buf	= 0;
+  max	= BUFSIZ;
+  for (got=0;; )
+    {
+      int	tmp;
+
+      max	+= got;
+      buf	= re_alloc(buf, max);
+      tmp	= myread(fd, buf+got, max-got);
+      if (tmp<0)
+	return myfree(buf);
+      if (!tmp)
+	break;
+      got += tmp;
+    }
+  return shrinkalloc(buf, *len=got);
+}
+
+static char *
+readargs(const char *name)
+{
+  char		*buf, *out;
+  size_t	len;
+  int		fd, need, i, pos;
+
+  if ((fd = open(name, O_RDONLY))<0)
+    return mystrdup("error");
+
+  buf	= readall(fd, &len);
+  if (myclose(fd) || !buf)
+    return mystrdup("error");
+
+  need	= 3;
+  for (i=len; --i>=0; )
+    {
+      switch (buf[i])
+	{
+	case 0:
+	  need++;
+	case '\\':
+	case '\"':
+	  need++;
+	  break;
+	}
+      need++;
+   }
+
+  out	= alloc(need);
+  pos	= 0;
+  for (i=0; i<len; i++)
+    {
+      if (i)
+        out[pos++]	= ' ';
+      out[pos++]	= '\"';
+      for (; buf[i]; i++)
+	{
+	  switch (buf[i])
+	    {
+	    case '\\':
+	    case '\"':
+	      out[pos++]	= '\"';
+	      break;
+	    }
+	  out[pos++]	= buf[i];
+	}
+      out[pos++]	= '\"';
+    }
+  out[pos++]	= 0;
+  if (pos>need)
+    FATAL("internal error in readargs()");
+  myfree(buf);
+  return out;
 }
 
 static char *
@@ -362,14 +453,15 @@ myvsnprintf(char *buf, size_t max, const char *format, va_list olist)
 
   if (max<PATH_MAX)
     max	= PATH_MAX;
+  /* buf==NULL	*/
   for (;;)
     {
       int	len;
 
-      buf	= alloc(size);
+      buf	= re_alloc(buf, size);
 
       va_copy(list, olist);
-      len = vsnprintf(buf, max, format, list);
+      len = vsnprintf(buf, size, format, list);
       va_end(list);
       
       if (len<0)
@@ -687,14 +779,12 @@ synthetic_u(int synth, unsigned *var, unsigned val)
   return synth;
 }
 
+/* Set a syntetic, returns 0 if no change	*/
 static int
 synthetic_s(int synth, const char **var, const char *val_allocated)
 {
   if (!val_allocated || (*var && !strcmp(*var, val_allocated)))
-    {
-      myfree(val_allocated);
-      return 0;
-    }
+    return myfree(val_allocated), 0;
   myfree(*var);
   *var = val_allocated;
   return synth;
@@ -756,6 +846,7 @@ synthetic(struct _pids *p, unsigned pid)
   ret	|= synthetic_u(SYNTHETIC_PPID, &p->ppid, ppid);
   ret	|= synthetic_s(SYNTHETIC_CMD,  &p->cmd,  myreadlink(mysnprintf(tmp, sizeof tmp, "/proc/%u/exe", pid)));
   ret	|= synthetic_s(SYNTHETIC_PWD,  &p->pwd,  myreadlink(mysnprintf(tmp, sizeof tmp, "/proc/%u/cwd", pid)));
+  ret	|= synthetic_s(SYNTHETIC_ARGS, &p->args, readargs(mysnprintf(tmp, sizeof tmp, "/proc/%u/cmdline", pid)));
 
   xDP(("() ret=%d", ret));
   return ret;
@@ -809,6 +900,7 @@ print_events(const struct fanotify_event_metadata *ptr)
   if (synth)
     {
       print_event(synth&SYNTHETIC_CMD,  0, "CMD",  ptr, "%s", p->cmd);
+      print_event(synth&SYNTHETIC_ARGS, 0, "ARGS", ptr, "%s", p->args);
       print_event(synth&SYNTHETIC_PWD,  0, "PWD",  ptr, "%s", p->pwd);
       print_event(synth&SYNTHETIC_PPID, 0, "PPID", ptr, "%u", p->ppid);
       print_event(synth&SYNTHETIC_TIME, 0, "TIME", ptr, "%llu", p->start);
