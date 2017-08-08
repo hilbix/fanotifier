@@ -85,7 +85,7 @@ static const char *arg0;
 
 static struct _pids
   {
-    unsigned	count;
+    unsigned	count, counter;
     unsigned	ppid;
     const char	*pwd, *cmd, *args;
     unsigned long long	start;
@@ -500,6 +500,7 @@ proc_reset(struct _pids *p)
   str_set(&p->cmd, NULL);
   p->ppid	= 0;
   p->count	= 0;
+  p->counter	= 0;
 }
 
 static unsigned
@@ -841,14 +842,17 @@ synthetic(struct _pids *p, unsigned pid)
       ret	|= SYNTHETIC_TIME;
     }
   else
-    p->count	= 10;	/* this is an arbitrary value, just ignore the next 10 events before checking again	*/
+    p->count	= p->counter++ >> 2;	/* just do something like a slow quadratic backoff	*/
 
   ret	|= synthetic_u(SYNTHETIC_PPID, &p->ppid, ppid);
   ret	|= synthetic_s(SYNTHETIC_CMD,  &p->cmd,  myreadlink(mysnprintf(tmp, sizeof tmp, "/proc/%u/exe", pid)));
   ret	|= synthetic_s(SYNTHETIC_PWD,  &p->pwd,  myreadlink(mysnprintf(tmp, sizeof tmp, "/proc/%u/cwd", pid)));
   ret	|= synthetic_s(SYNTHETIC_ARGS, &p->args, readargs(mysnprintf(tmp, sizeof tmp, "/proc/%u/cmdline", pid)));
 
-  xDP(("() ret=%d", ret));
+  if (ret & SYNTHETIC_ARGS)
+    p->counter	= 0;
+
+  DP(("() counter=%d ret=%x", p->counter, ret));
   return ret;
 }
 
