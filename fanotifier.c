@@ -763,7 +763,7 @@ print_event(int synthetic, int mask, const char *event, const struct fanotify_ev
 {
   va_list	list;
 
-  if (!synthetic && !mask)
+  if (!(synthetic&(~synth_disable)) && !mask)
     return;
   000; /* XXX TODO XXX: escapes, ignores, etc.	*/
   va_start(list, name);
