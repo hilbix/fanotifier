@@ -1,4 +1,9 @@
 > **Some parts (flags, +-event) are still missing, nearly not tested, some options have bugs**
+>
+> Currently there is a serious deadlock in case you use mode `+32` and redirect output to a file, if this file is on a mount which is monitored by `fanotifier`.
+> In this case `fanotifier` blocks itself while trying to output data to the file.
+> To avoid this, use a file on some other mountpoint, for example in your "personal session-ramdisk" ``/run/user/`id -u`/``
+> A future version might repair this by using threads.
 
 
 # fanotifier
@@ -37,9 +42,9 @@ To run:
   - `256` follow softlinks.  Do not use `FAN_MARK_DONT_FOLLOW`
   - `512` do not quote 3rd column (better human readable)
   - `1024` output empty separation lines (better human readable)
-  - `2048` (future use)
-  - `4096` (future use)
-  - `8192` (future use)
+  - `2048` (future use: output information on parents, too)
+  - `4096` output pid's file descriptor before filename
+  - `8192` do not cache PWD/CMD/ARGS, always recheck them (higher CPU load).
   - `16384` (future use)
   - `32768` debugging
   - `65536` and above: future use

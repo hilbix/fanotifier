@@ -86,7 +86,8 @@ static const char *arg0;
 static struct _pids
   {
     unsigned	count, counter;
-    unsigned	ppid;
+    int		synth;
+    long	ppid;
     const char	*pwd, *cmd, *args;
     unsigned long long	start;
   }	**pids;
@@ -123,9 +124,17 @@ struct usage
     { "do not quote 3rd column",			FLAG_NO_QUOTE },
 #define	FLAG_HUMAN					0x0400
     { "output empty separation lines (for humans)",	FLAG_HUMAN },
+#if 0
+#define	FLAG_PARENT					0x0800
+    { "print parent information as well",		FLAG_PARENT },
+#endif
+#define	FLAG_FD						0x1000
+    { "output file number before file name",		FLAG_FD },
+#define	FLAG_NOCACHE					0x2000
+    { "check PWD/CMD/ARGS for each message",		FLAG_NOCACHE },
 #define	FLAG_DEBUG					0x8000
     { "enable debugging (skips some errors)",		FLAG_DEBUG },
-#define	FLAG_ALL					0x87ff
+#define	FLAG_ALL					0xbfff
     { 0 }
   }, *usg = usages;
 
@@ -184,7 +193,7 @@ re_alloc(void *ptr, size_t len)
 }
 
 static void *
-alloc(size_t len)
+alloc0(size_t len)
 {
   void	*ptr;
 
@@ -292,7 +301,7 @@ myreadlink(const char *link)
       ssize_t		ok;
       char		*buf;
 
-      buf	= alloc(size);
+      buf	= alloc0(size);
       ok	= readlink(link, buf, size);
       if (ok<0)
 	return myfree(buf);
@@ -366,7 +375,7 @@ readargs(const char *name)
       need++;
    }
 
-  out	= alloc(need);
+  out	= alloc0(need);
   pos	= 0;
   for (i=0; i<len; i++)
     {
@@ -493,7 +502,7 @@ str_set(const char **str, const char *val)
   *str = val;
 }
 
-static void
+static struct _pids *
 proc_reset(struct _pids *p)
 {
   str_set(&p->pwd, NULL);
@@ -501,6 +510,7 @@ proc_reset(struct _pids *p)
   p->ppid	= 0;
   p->count	= 0;
   p->counter	= 0;
+  return p;
 }
 
 static unsigned
@@ -598,7 +608,7 @@ ignorepid(unsigned long pid)
   if (!pids)
     {
       pid_max	= get_pid_max();
-      pids	= alloc(pid_max * sizeof *pids);
+      pids	= alloc0(pid_max * sizeof *pids);
     }
   if (pid>=pid_max)
     OOPS("process id %lu out of bounds, max is %u", pid, pid_max);
@@ -771,8 +781,17 @@ print_event(int synthetic, int mask, const char *event, const struct fanotify_ev
   va_end(list);
 }
 
+static void
+print_event_fd(int synthetic, int mask, const char *event, const struct fanotify_event_metadata *ptr, const char *name)
+{
+  if (flags & FLAG_FD)
+    print_event(synthetic, mask, event, ptr, "%ld %s", (long)ptr->fd, name);
+  else
+    print_event(synthetic, mask, event, ptr, "%s", name);
+}
+
 static int
-synthetic_u(int synth, unsigned *var, unsigned val)
+synthetic_l(int synth, long *var, long val)
 {
   if (*var==val)
     return 0;
@@ -798,20 +817,30 @@ emptyline(void)
     putchar('\n');
 }
 
-static int
-synthetic(struct _pids *p, unsigned pid)
+static struct _pids *
+synthetic(long pid)
 {
+  struct _pids		*p;
   char			tmp[PATH_MAX], buf[BUFSIZ], *s, *state;
   unsigned long long	start;
-  int			ppid, ret;
+  long			ppid;
 
-  xDP(("() pid=%u", pid));
-  ret	= 0;
-  if (!myreadin(buf, sizeof buf, mysnprintf(tmp, sizeof tmp, "/proc/%u/stat", pid)))
+  if (pid<0 || pid>=pid_max)
+    return 0;
+  if (PID_IGNORED == (p = pids[pid]))
+    return p;
+
+  if (!p)
+    p	= pids[pid]	= alloc0(sizeof *p);
+  if (!(flags & FLAG_NOCACHE) && p->count--)
+    return p;
+
+  xDP(("() pid=%ld", pid));
+  p->synth	= 0;
+  if (!myreadin(buf, sizeof buf, mysnprintf(tmp, sizeof tmp, "/proc/%ld/stat", pid)))
     {
       verbose("(OOPS)", pid, "cannot read %s", tmp);
-      proc_reset(p);
-      return 0;
+      return proc_reset(p);
     }
   /* WTF? /proc/self/stat's 2nd field (comm) can contain any character, like SPC or a faked /proc/self/stat line.
    * Hunt for the last non-digit.  That's the start of the 3rd field (state)
@@ -828,10 +857,10 @@ synthetic(struct _pids *p, unsigned pid)
       case '5': case '6': case '7': case '8': case '9':
         break;
       }
-  if (!state || 2 != sscanf(state, "%*c %d %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %*u %*d %*d %*d %*d %*d %*d %llu ", &ppid, &start))
+  if (!state || 2 != sscanf(state, "%*c %ld %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %*u %*d %*d %*d %*d %*d %*d %llu ", &ppid, &start))
     {
       OOPS("cannot parse %s: '%s'", tmp, state);
-      return 0;
+      return p;
     }
 
   if (p->start != start)
@@ -839,28 +868,28 @@ synthetic(struct _pids *p, unsigned pid)
       proc_reset(p);
       p->start = start;
       emptyline();
-      ret	|= SYNTHETIC_TIME;
+      p->synth	|= SYNTHETIC_TIME;
     }
   else
     p->count	= p->counter++ >> 2;	/* just do something like a slow quadratic backoff	*/
 
-  ret	|= synthetic_u(SYNTHETIC_PPID, &p->ppid, ppid);
-  ret	|= synthetic_s(SYNTHETIC_CMD,  &p->cmd,  myreadlink(mysnprintf(tmp, sizeof tmp, "/proc/%u/exe", pid)));
-  ret	|= synthetic_s(SYNTHETIC_PWD,  &p->pwd,  myreadlink(mysnprintf(tmp, sizeof tmp, "/proc/%u/cwd", pid)));
-  ret	|= synthetic_s(SYNTHETIC_ARGS, &p->args, readargs(mysnprintf(tmp, sizeof tmp, "/proc/%u/cmdline", pid)));
+  p->synth	|= synthetic_l(SYNTHETIC_PPID, &p->ppid, ppid);
+  p->synth	|= synthetic_s(SYNTHETIC_CMD,  &p->cmd,  myreadlink(mysnprintf(tmp, sizeof tmp, "/proc/%ld/exe", pid)));
+  p->synth	|= synthetic_s(SYNTHETIC_PWD,  &p->pwd,  myreadlink(mysnprintf(tmp, sizeof tmp, "/proc/%ld/cwd", pid)));
+  p->synth	|= synthetic_s(SYNTHETIC_ARGS, &p->args, readargs(mysnprintf(tmp, sizeof tmp, "/proc/%ld/cmdline", pid)));
 
-  if (ret & SYNTHETIC_ARGS)
+  if (p->synth & SYNTHETIC_ARGS)
     p->counter	= 0;
 
-  DP(("() counter=%d ret=%x", p->counter, ret));
-  return ret;
+  DP(("() counter=%d synth=%x", p->counter, p->synth));
+  return p;
 }
 
 static void
 print_events(const struct fanotify_event_metadata *ptr)
 {
   char		fdname[32], name[PATH_MAX];
-  int		len, have, synth;
+  int		len, have;
   unsigned	bits;
   struct _modes *m;
   struct _pids	*p;
@@ -877,15 +906,7 @@ print_events(const struct fanotify_event_metadata *ptr)
     }
   name[len] = 0;
 
-  synth	= 0;
-  p	= 0;
-  if (ptr->pid>0 && ptr->pid<pid_max && PID_IGNORED != (p = pids[ptr->pid]))
-    {
-      if (!p)
-	p	= pids[ptr->pid]	= alloc(sizeof *p);
-      if (!p->count--)
-	synth	= synthetic(p, ptr->pid);
-    }
+  p	= synthetic((long)ptr->pid);
 
   if (ptr->mask & PERMS_ALL)
     {
@@ -901,25 +922,25 @@ print_events(const struct fanotify_event_metadata *ptr)
   if (p == PID_IGNORED)
     return;	/* ignored by PID	*/
 
-  if (synth)
+  if (p->synth)
     {
-      print_event(synth&SYNTHETIC_CMD,  0, "CMD",  ptr, "%s", p->cmd);
-      print_event(synth&SYNTHETIC_ARGS, 0, "ARGS", ptr, "%s", p->args);
-      print_event(synth&SYNTHETIC_PWD,  0, "PWD",  ptr, "%s", p->pwd);
-      print_event(synth&SYNTHETIC_PPID, 0, "PPID", ptr, "%u", p->ppid);
-      print_event(synth&SYNTHETIC_TIME, 0, "TIME", ptr, "%llu", p->start);
+      print_event(p->synth&SYNTHETIC_CMD,  0, "CMD",  ptr, "%s", p->cmd);
+      print_event(p->synth&SYNTHETIC_ARGS, 0, "ARGS", ptr, "%s", p->args);
+      print_event(p->synth&SYNTHETIC_PWD,  0, "PWD",  ptr, "%s", p->pwd);
+      print_event(p->synth&SYNTHETIC_PPID, 0, "PPID", ptr, "%ld", p->ppid);
+      print_event(p->synth&SYNTHETIC_TIME, 0, "TIME", ptr, "%llu", p->start);
     }
 
   have = 0;
   for (m=modes+1; m->name; m++)
     if ((bits=ptr->mask & (m->mode|m->perm))!=0)
       {
-        print_event(0, bits, m->name, ptr, "%s", name);
+        print_event_fd(0, bits, m->name, ptr, name);
         have = 1;
       }
 
   if (!have)
-    print_event(SYNTHETIC_UNKNOWN, 0, "(UNKNOWN)", ptr, "%s", name);
+    print_event_fd(SYNTHETIC_UNKNOWN, 0, "(UNKNOWN)", ptr, name);
 
   if (flags & FLAG_UNBUFFERED && fflush(stdout))
     FATAL("STDOUT went away");
@@ -964,7 +985,7 @@ int
 main(int argc, const char * const *argv)
 {
   arg0 = argv[0];
-  ignorepid(getpid());
+  ignorepid((unsigned long)getpid());
   options(argv+1);
   if (fa<0)
     add_path(".");
