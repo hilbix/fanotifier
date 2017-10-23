@@ -15,6 +15,9 @@
 
 #include <sys/fanotify.h>
 
+#define	PID_TYPE	long
+#define	PID_FORMAT	"%ld"
+
 #if 0
 #define	DP(X)	do { debugset(__FILE__, __LINE__, __FUNCTION__); debugprintf X; } while (0)
 static void
@@ -76,7 +79,7 @@ static struct _modes
   };
 
 static int	mode_disable, perm_disable, synth_disable;
-static unsigned	pid_max;
+static PID_TYPE	pid_max;
 static unsigned	flags;
 static int	fa = -1;
 static const char *arg0;
@@ -87,7 +90,7 @@ static struct _pids
   {
     unsigned	count, counter;
     int		synth;
-    long	ppid;
+    PID_TYPE	ppid;
     const char	*pwd, *cmd, *args;
     unsigned long long	start;
   }	**pids;
@@ -513,7 +516,7 @@ proc_reset(struct _pids *p)
   return p;
 }
 
-static unsigned
+static PID_TYPE
 get_pid_max(void)
 {
   char	buf[BUFSIZ];
@@ -611,7 +614,7 @@ ignorepid(unsigned long pid)
       pids	= alloc0(pid_max * sizeof *pids);
     }
   if (pid>=pid_max)
-    OOPS("process id %lu out of bounds, max is %u", pid, pid_max);
+    OOPS("process id %ul out of bounds, max is " PID_FORMAT, pid, pid_max);
   else
     pids[pid] = PID_IGNORED;
 }
@@ -728,9 +731,9 @@ escape(const char *s)
 }
 
 static void
-vev(const char *ev, long pid, const char *s, va_list list)
+vev(const char *ev, PID_TYPE pid, const char *s, va_list list)
 {
-  printf("%s\t%ld\t", ev, pid);
+  printf("%s\t" PID_FORMAT "\t", ev, pid);
   if (flags & FLAG_NO_QUOTE)
     vprintf(s, list);
   else
@@ -746,7 +749,7 @@ vev(const char *ev, long pid, const char *s, va_list list)
 
 #if 0
 static void
-ev(const char *ev, long pid, const char *s, ...)
+ev(const char *ev, PID_TYPE pid, const char *s, ...)
 {
   va_list	list;
 
@@ -757,7 +760,7 @@ ev(const char *ev, long pid, const char *s, ...)
 #endif
 
 static void
-verbose(const char *ev, long pid, const char *s, ...)
+verbose(const char *ev, PID_TYPE pid, const char *s, ...)
 {
   va_list	list;
 
@@ -769,7 +772,7 @@ verbose(const char *ev, long pid, const char *s, ...)
 }
 
 static void
-print_event(int synthetic, int mask, const char *event, const struct fanotify_event_metadata *ptr, const char *name, ...)
+print_event(int synthetic, int mask, const char *event, PID_TYPE pid, const char *name, ...)
 {
   va_list	list;
 
@@ -777,21 +780,21 @@ print_event(int synthetic, int mask, const char *event, const struct fanotify_ev
     return;
   000; /* XXX TODO XXX: escapes, ignores, etc.	*/
   va_start(list, name);
-  vev(event, (long)ptr->pid, name, list);
+  vev(event, pid, name, list);
   va_end(list);
 }
 
 static void
-print_event_fd(int synthetic, int mask, const char *event, const struct fanotify_event_metadata *ptr, const char *name)
+print_event_fd(int synthetic, int mask, const char *event, PID_TYPE pid, const char *name, int fd)
 {
   if (flags & FLAG_FD)
-    print_event(synthetic, mask, event, ptr, "%ld %s", (long)ptr->fd, name);
+    print_event(synthetic, mask, event, pid, "%d %s", fd, name);
   else
-    print_event(synthetic, mask, event, ptr, "%s", name);
+    print_event(synthetic, mask, event, pid, "%s", name);
 }
 
 static int
-synthetic_l(int synth, long *var, long val)
+synthetic_P(int synth, PID_TYPE *var, PID_TYPE val)
 {
   if (*var==val)
     return 0;
@@ -818,12 +821,12 @@ emptyline(void)
 }
 
 static struct _pids *
-synthetic(long pid)
+synthetic(PID_TYPE pid)
 {
   struct _pids		*p;
   char			tmp[PATH_MAX], buf[BUFSIZ], *s, *state;
   unsigned long long	start;
-  long			ppid;
+  PID_TYPE		ppid;
 
   if (pid<0 || pid>=pid_max)
     return 0;
@@ -835,9 +838,9 @@ synthetic(long pid)
   if (!(flags & FLAG_NOCACHE) && p->count--)
     return p;
 
-  xDP(("() pid=%ld", pid));
+  xDP(("() pid=" PID_FORMAT, pid));
   p->synth	= 0;
-  if (!myreadin(buf, sizeof buf, mysnprintf(tmp, sizeof tmp, "/proc/%ld/stat", pid)))
+  if (!myreadin(buf, sizeof buf, mysnprintf(tmp, sizeof tmp, "/proc/" PID_FORMAT "/stat", pid)))
     {
       verbose("(OOPS)", pid, "cannot read %s", tmp);
       return proc_reset(p);
@@ -857,7 +860,7 @@ synthetic(long pid)
       case '5': case '6': case '7': case '8': case '9':
         break;
       }
-  if (!state || 2 != sscanf(state, "%*c %ld %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %*u %*d %*d %*d %*d %*d %*d %llu ", &ppid, &start))
+  if (!state || 2 != sscanf(state, "%*c " PID_FORMAT " %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %*u %*d %*d %*d %*d %*d %*d %llu ", &ppid, &start))
     {
       OOPS("cannot parse %s: '%s'", tmp, state);
       return p;
@@ -873,10 +876,10 @@ synthetic(long pid)
   else
     p->count	= p->counter++ >> 2;	/* just do something like a slow quadratic backoff	*/
 
-  p->synth	|= synthetic_l(SYNTHETIC_PPID, &p->ppid, ppid);
-  p->synth	|= synthetic_s(SYNTHETIC_CMD,  &p->cmd,  myreadlink(mysnprintf(tmp, sizeof tmp, "/proc/%ld/exe", pid)));
-  p->synth	|= synthetic_s(SYNTHETIC_PWD,  &p->pwd,  myreadlink(mysnprintf(tmp, sizeof tmp, "/proc/%ld/cwd", pid)));
-  p->synth	|= synthetic_s(SYNTHETIC_ARGS, &p->args, readargs(mysnprintf(tmp, sizeof tmp, "/proc/%ld/cmdline", pid)));
+  p->synth	|= synthetic_P(SYNTHETIC_PPID, &p->ppid, ppid);
+  p->synth	|= synthetic_s(SYNTHETIC_CMD,  &p->cmd,  myreadlink(mysnprintf(tmp, sizeof tmp, "/proc/" PID_FORMAT "/exe", pid)));
+  p->synth	|= synthetic_s(SYNTHETIC_PWD,  &p->pwd,  myreadlink(mysnprintf(tmp, sizeof tmp, "/proc/" PID_FORMAT "/cwd", pid)));
+  p->synth	|= synthetic_s(SYNTHETIC_ARGS, &p->args, readargs(mysnprintf(tmp, sizeof tmp, "/proc/" PID_FORMAT "/cmdline", pid)));
 
   if (p->synth & SYNTHETIC_ARGS)
     p->counter	= 0;
@@ -906,14 +909,14 @@ print_events(const struct fanotify_event_metadata *ptr)
     }
   name[len] = 0;
 
-  p	= synthetic((long)ptr->pid);
+  p	= synthetic((PID_TYPE)ptr->pid);
 
   if (ptr->mask & PERMS_ALL)
     {
       struct fanotify_response r;
  
       if (flags & FLAG_VERBOSE)
-        print_event(SYNTHETIC_ALLOW, 0, "ALLOW", ptr, "%s", name);
+        print_event(SYNTHETIC_ALLOW, 0, "ALLOW", (PID_TYPE)ptr->pid, "%s", name);
       r.fd		= ptr->fd;
       r.response	= FAN_ALLOW;
       mywrite(fa, &r, sizeof r);
@@ -924,23 +927,23 @@ print_events(const struct fanotify_event_metadata *ptr)
 
   if (p->synth)
     {
-      print_event(p->synth&SYNTHETIC_CMD,  0, "CMD",  ptr, "%s", p->cmd);
-      print_event(p->synth&SYNTHETIC_ARGS, 0, "ARGS", ptr, "%s", p->args);
-      print_event(p->synth&SYNTHETIC_PWD,  0, "PWD",  ptr, "%s", p->pwd);
-      print_event(p->synth&SYNTHETIC_PPID, 0, "PPID", ptr, "%ld", p->ppid);
-      print_event(p->synth&SYNTHETIC_TIME, 0, "TIME", ptr, "%llu", p->start);
+      print_event(p->synth&SYNTHETIC_CMD,  0, "CMD",  (PID_TYPE)ptr->pid, "%s", p->cmd);
+      print_event(p->synth&SYNTHETIC_ARGS, 0, "ARGS", (PID_TYPE)ptr->pid, "%s", p->args);
+      print_event(p->synth&SYNTHETIC_PWD,  0, "PWD",  (PID_TYPE)ptr->pid, "%s", p->pwd);
+      print_event(p->synth&SYNTHETIC_PPID, 0, "PPID", (PID_TYPE)ptr->pid, PID_FORMAT, p->ppid);
+      print_event(p->synth&SYNTHETIC_TIME, 0, "TIME", (PID_TYPE)ptr->pid, "%llu", p->start);
     }
 
   have = 0;
   for (m=modes+1; m->name; m++)
     if ((bits=ptr->mask & (m->mode|m->perm))!=0)
       {
-        print_event_fd(0, bits, m->name, ptr, name);
+        print_event_fd(0, bits, m->name, (PID_TYPE)ptr->pid, name, ptr->fd);
         have = 1;
       }
 
   if (!have)
-    print_event_fd(SYNTHETIC_UNKNOWN, 0, "(UNKNOWN)", ptr, name);
+    print_event_fd(SYNTHETIC_UNKNOWN, 0, "(UNKNOWN)", (PID_TYPE)ptr->pid, name, ptr->fd);
 
   if (flags & FLAG_UNBUFFERED && fflush(stdout))
     FATAL("STDOUT went away");
@@ -972,7 +975,7 @@ monitor(void)
 
       if (ptr->fd<0)
 	{
-          print_event(0, FAN_Q_OVERFLOW, "OVERFLOW", ptr, NULL);
+          print_event(0, FAN_Q_OVERFLOW, "OVERFLOW", (PID_TYPE)ptr->pid, NULL);
 	  continue;
 	}
       print_events(ptr);
