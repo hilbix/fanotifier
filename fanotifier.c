@@ -373,13 +373,13 @@ readargs(const char *name)
       if (i)
         out[pos++]	= ' ';
       out[pos++]	= '\"';
-      for (; buf[i]; i++)
+      for (; i<len && buf[i]; i++)
 	{
 	  switch (buf[i])
 	    {
 	    case '\\':
 	    case '\"':
-	      out[pos++]	= '\"';
+	      out[pos++]	= '\\';
 	      break;
 	    }
 	  out[pos++]	= buf[i];
@@ -388,7 +388,7 @@ readargs(const char *name)
     }
   out[pos++]	= 0;
   if (pos>need)
-    FATAL("internal error in readargs()");
+    FATAL("internal error in readargs(): %s: got %d, calulated=%d)", name, pos, need);
   myfree(buf);
   return out;
 }
