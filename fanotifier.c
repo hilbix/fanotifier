@@ -8,11 +8,13 @@
 #include <errno.h>
 #include <ctype.h>
 
+#include <sys/time.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <dirent.h>
 
+#include <sys/resource.h>
 #include <sys/fanotify.h>
 
 #define	PID_TYPE	long
@@ -141,11 +143,17 @@ struct usage
     { 0 }
   }, *usg = usages;
 
+static int oopses = 0;
 static void
 vOOPS(int e, const char *s, va_list list, int nonfatal)
 {
+  if (++oopses>10000)
+    nonfatal = 0;
   if (!nonfatal && fa>=0)
-    close(fa);			/* just to be sure nothing hangs */
+    {
+      close(fa);			/* just to be sure nothing hangs */
+      fa = -1;
+    }
 
   fprintf(stderr, "OOPS: ");
   vfprintf(stderr, s, list);
@@ -171,6 +179,16 @@ OOPS(const char *s, ...)
 
   va_start(list, s);
   vOOPS(errno, s, list, flags & FLAG_DEBUG);
+  va_end(list);
+}
+
+static void
+WTF(const char *s, ...)
+{
+  va_list	list;
+
+  va_start(list, s);
+  vOOPS(errno, s, list, 1);
   va_end(list);
 }
 
@@ -950,6 +968,15 @@ print_events(const struct fanotify_event_metadata *ptr)
 }
 
 static int
+getmaxfdcount(void)
+{
+  struct rlimit lim;
+
+  getrlimit(RLIMIT_NOFILE, &lim);
+  return lim.rlim_cur;
+}
+
+static int
 monitor(void)
 {
   struct fanotify_event_metadata	ev[1000];
@@ -960,13 +987,38 @@ monitor(void)
     FATAL("cannot cd %s", "/proc/self/fd");
 
   len = read(fa, ev, sizeof ev);
-  if (len<0 && errno!=EAGAIN && errno!=EINTR)
-    {
-      OOPS("read error on fanotify FD %d", fa);
-      return 0;
+  if (len<0)
+    switch (errno)
+      {
+      case EAGAIN:
+      case EINTR:
+	return 1;
+
+      case EINVAL:
+        WTF("event buffer too small (probably a progam bug)");
+	return 1;
+
+      case EMFILE:
+        WTF("all %d file descriptors are used up, please increase ulimit -n", getmaxfdcount());
+	return 1;
+
+      case ENOENT:
+        WTF("ignoring ENOENT (max %d fds)", getmaxfdcount());
+	return 1;
+
+      case ENFILE:
+        OOPS("system ran out of file descriptors, please increase /proc/sys/fs/file-max");
+	return 1;
+
+      default:
+        FATAL("read error on fanotify FD %d", fa);
+        return 0;
     }
-  if (len<=0)
-    return 1;
+  if (!len)
+    {
+      OOPS("this should not happen: 0 bytes read from fanotify FD %d", fa);
+      return 1;
+    }
 
   for (ptr=ev; FAN_EVENT_OK(ptr, len);  ptr = FAN_EVENT_NEXT(ptr, len))
     {
@@ -981,6 +1033,7 @@ monitor(void)
       print_events(ptr);
       myclose(ptr->fd);
     }
+  oopses = 0;	/* hack */
   return 1;
 }
 
