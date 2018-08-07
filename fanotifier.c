@@ -108,7 +108,7 @@ struct usage
 #define	FLAG_DIR					0x0002
     { "path must be directory",				FLAG_DIR },
 #define	FLAG_DIR_CHILD					0x0003
-    { "directory with monitoring of directory childs",	FLAG_DIR_CHILD },
+    { "directory with monitoring of directory children",FLAG_DIR_CHILD },
 #define	FLAG_NO_FAN_NODIR				0x0004
     { "do not monitor directories",			FLAG_NO_FAN_NODIR },
 #define	FLAG_VERBOSE					0x0008
