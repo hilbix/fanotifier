@@ -568,7 +568,7 @@ endis(const char *event, int enable)
   if (usg)
     {
       fprintf(stderr, "Usage: %s [+|-]event|-PID|+flags|path..", arg0);
-      fprintf(stderr, "\n\tEvent values:\n");
+      fprintf(stderr, "\n\tEvent values: (ALL does not contain OVERFLOW)\n");
       for (m=modes; m->name && ! m->synthetic; m++)
         fprintf(stderr, "\t%s", m->name);
       fprintf(stderr, "\n\tSynthetic events:\n");
