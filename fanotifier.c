@@ -1002,17 +1002,14 @@ monitor(void)
         WTF("all %d file descriptors are used up, please increase ulimit -n", getmaxfdcount());
 	return 1;
 
-      case ENOENT:
-        WTF("ignoring ENOENT (max %d fds)", getmaxfdcount());
-	return 1;
-
       case ENFILE:
         OOPS("system ran out of file descriptors, please increase /proc/sys/fs/file-max");
 	return 1;
 
-      default:
-        FATAL("read error on fanotify FD %d", fa);
-        return 0;
+      /* sigh, it can return just anything	*/
+      case ENOENT:	WTF("ignoring ENOENT");	return 1;
+      case EACCES:	WTF("ignoring EACCES");	return 1;
+      default:		WTF("ignoring error");	return 1;
     }
   if (!len)
     {
@@ -1033,7 +1030,7 @@ monitor(void)
       print_events(ptr);
       myclose(ptr->fd);
     }
-  oopses = 0;	/* hack */
+  oopses = 0;	/* oopses is a hack to prevent endless WTF loops */
   return 1;
 }
 
