@@ -267,9 +267,9 @@ static void mywrite(int fd, const void *ptr, size_t max)
 
       ok = write(fd, ((const char *)ptr)+pos, max-pos);
       if (ok<0 && errno==EINTR)
-	continue;
+        continue;
       if(ok<=0)
-	FATAL("cannot write to %d", fd);
+        FATAL("cannot write to %d", fd);
       pos += ok;
     }
 }
@@ -287,15 +287,15 @@ myreadin(char *buf, size_t max, const char *name)
 
       len = myread(fd, buf+got, max-got);
       if (len<0)
-	return 0;
+        return 0;
       if (len)
-	{
-	  got += len;
-	  continue;
-	}
+        {
+          got += len;
+          continue;
+        }
       buf[got] = 0;
       if (myclose(fd))
-	return 0;
+        return 0;
       return buf;
     }
   OOPS("buffer too small to read %s", name);
@@ -325,11 +325,11 @@ myreadlink(const char *link)
       buf	= alloc0(size);
       ok	= readlink(link, buf, size);
       if (ok<0)
-	return myfree(buf);
+        return myfree(buf);
       if (ok<size)
         {
-	  buf[ok]	= 0;
-	  return shrinkalloc(buf, ok+1);
+          buf[ok]	= 0;
+          return shrinkalloc(buf, ok+1);
         }
       myfree(buf);
       if (lstat(link, &st))
@@ -359,9 +359,9 @@ readall(int fd, size_t *len)
       buf	= re_alloc(buf, max);
       tmp	= myread(fd, buf+got, max-got);
       if (tmp<0)
-	return myfree(buf);
+        return myfree(buf);
       if (!tmp)
-	break;
+        break;
       got += tmp;
     }
   return shrinkalloc(buf, *len=got);
@@ -385,14 +385,14 @@ readargs(const char *name)
   for (i=len; --i>=0; )
     {
       switch (buf[i])
-	{
-	case 0:
-	  need++;
-	case '\\':
-	case '\"':
-	  need++;
-	  break;
-	}
+        {
+        case 0:
+          need++;
+        case '\\':
+        case '\"':
+          need++;
+          break;
+        }
       need++;
    }
 
@@ -404,16 +404,16 @@ readargs(const char *name)
         out[pos++]	= ' ';
       out[pos++]	= '\"';
       for (; i<len && buf[i]; i++)
-	{
-	  switch (buf[i])
-	    {
-	    case '\\':
-	    case '\"':
-	      out[pos++]	= '\\';
-	      break;
-	    }
-	  out[pos++]	= buf[i];
-	}
+        {
+          switch (buf[i])
+            {
+            case '\\':
+            case '\"':
+              out[pos++]	= '\\';
+              break;
+            }
+          out[pos++]	= buf[i];
+        }
       out[pos++]	= '\"';
     }
   out[pos++]	= 0;
@@ -495,9 +495,9 @@ myvsnprintf(char *buf, size_t max, const char *format, va_list olist)
       va_end(list);
       
       if (len<0)
-	FATAL("sprintf failed for format %s", format);
+        FATAL("sprintf failed for format %s", format);
       if (len<size-1)
-	return shrinkalloc(buf, len+1);
+        return shrinkalloc(buf, len+1);
 
       size += max;
     }
@@ -551,18 +551,18 @@ endis(const char *event, int enable)
     if (!strcmp(event, m->name))
       {
         if (enable)
-	  {
-	    mode_disable &= ~m->mode;
-	    perm_disable &= ~m->perm;
-	    synth_disable &= ~m->synthetic;
-	  }
-	else
-	  {
-	    mode_disable |= m->mode;
-	    perm_disable |= m->perm;
-	    synth_disable |= m->synthetic;
-	  }
-	return;
+          {
+            mode_disable &= ~m->mode;
+            perm_disable &= ~m->perm;
+            synth_disable &= ~m->synthetic;
+          }
+        else
+          {
+            mode_disable |= m->mode;
+            perm_disable |= m->perm;
+            synth_disable |= m->synthetic;
+          }
+        return;
       }
 
   if (usg)
@@ -647,14 +647,14 @@ add_path(const char *name)
 
   if (fa<0)
     fa	= fanotify_init(((flags & FLAG_BLOCKING) ? FAN_CLASS_PRE_CONTENT : FAN_CLASS_NOTIF)
-			| FAN_CLOEXEC
-			| ((flags & FLAG_FAN_UNLIMITED_QUEUE) ? FAN_UNLIMITED_QUEUE : 0)
-			| ((flags & FLAG_FAN_UNLIMITED_MARKS) ? FAN_UNLIMITED_MARKS : 0)
-			,
-			O_LARGEFILE
-			| O_CLOEXEC
-			| ((flags & FLAG_BLOCKING) ? O_RDWR : O_RDONLY)
-		       );
+                        | FAN_CLOEXEC
+                        | ((flags & FLAG_FAN_UNLIMITED_QUEUE) ? FAN_UNLIMITED_QUEUE : 0)
+                        | ((flags & FLAG_FAN_UNLIMITED_MARKS) ? FAN_UNLIMITED_MARKS : 0)
+                        ,
+                        O_LARGEFILE
+                        | O_CLOEXEC
+                        | ((flags & FLAG_BLOCKING) ? O_RDWR : O_RDONLY)
+                       );
   if (fa<0)
     FATAL("fanotify_init() failed");
 
@@ -694,7 +694,7 @@ options(const char * const *ptr)
 
           default:
             endis(*ptr+1, **ptr=='+');
-	    break;
+            break;
         }
 }
 
@@ -712,36 +712,36 @@ escape(const char *s)
         case 0:
   	  while (spc--)
   	    printf("\\40");
-	  return;
+          return;
 
-	case ' ':
-	  spc++;
-	  continue;
-	}
+        case ' ':
+          spc++;
+          continue;
+        }
 
       for (; spc; spc--)
-	putchar(' ');
+        putchar(' ');
 
       switch (c)
-	{
-	case '\a':	c = 'a'; break;
-	case '\b':	c = 'b'; break;
-	case '\f':	c = 'f'; break;
-	case '\n':	c = 'n'; break;
-	case '\r':	c = 'r'; break;
-	case '\t':	c = 't'; break;
-	case '\v':	c = 'v'; break;
-	case '\\':	c = '\\'; break;
+        {
+        case '\a':	c = 'a'; break;
+        case '\b':	c = 'b'; break;
+        case '\f':	c = 'f'; break;
+        case '\n':	c = 'n'; break;
+        case '\r':	c = 'r'; break;
+        case '\t':	c = 't'; break;
+        case '\v':	c = 'v'; break;
+        case '\\':	c = '\\'; break;
 
-	default:
-	  if (isprint(c))
-	    {
-	      putchar(c);
-	      continue;
-	    }
-	case '\'':	/* ANSI $'xxxx'	*/
-	  printf("\\x%02x", c);
-	  continue;
+        default:
+          if (isprint(c))
+            {
+              putchar(c);
+              continue;
+            }
+        case '\'':	/* ANSI $'xxxx'	*/
+          printf("\\x%02x", c);
+          continue;
         }
       putchar('\\');
       putchar(c);
@@ -873,7 +873,7 @@ synthetic(PID_TYPE pid)
     switch (*s)
       {
       default:
-	state = s;
+        state = s;
 
       case ' ': case '-': case '\n':
       case '0': case '1': case '2': case '3': case '4':
@@ -995,19 +995,19 @@ monitor(void)
       {
       case EAGAIN:
       case EINTR:
-	return 1;
+        return 1;
 
       case EINVAL:
         WTF("event buffer too small (probably a progam bug)");
-	return 1;
+        return 1;
 
       case EMFILE:
         WTF("all %d file descriptors are used up, please increase ulimit -n", getmaxfdcount());
-	return 1;
+        return 1;
 
       case ENFILE:
         OOPS("system ran out of file descriptors, please increase /proc/sys/fs/file-max");
-	return 1;
+        return 1;
 
       /* sigh, it can return just anything	*/
       case ENOENT:	WTF("ignoring ENOENT");	return 1;
@@ -1026,10 +1026,10 @@ monitor(void)
         FATAL("fanotify communication error, version mismatch");
 
       if (ptr->fd<0)
-	{
+        {
           print_event(0, FAN_Q_OVERFLOW, "OVERFLOW", (PID_TYPE)ptr->pid, NULL);
-	  continue;
-	}
+          continue;
+        }
       print_events(ptr);
       myclose(ptr->fd);
     }
