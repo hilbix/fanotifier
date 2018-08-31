@@ -933,11 +933,12 @@ print_events(const struct fanotify_event_metadata *ptr)
     {
       struct fanotify_response r;
  
-      if (flags & FLAG_VERBOSE)
-        print_event(SYNTHETIC_ALLOW, 0, "ALLOW", (PID_TYPE)ptr->pid, "%s", name);
       r.fd		= ptr->fd;
       r.response	= FAN_ALLOW;
       mywrite(fa, &r, sizeof r);
+
+      if (flags & FLAG_VERBOSE)
+        print_event(SYNTHETIC_ALLOW, 0, "ALLOW", (PID_TYPE)ptr->pid, "%s", name);
     }
 
   if (p == PID_IGNORED)
