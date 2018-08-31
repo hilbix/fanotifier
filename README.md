@@ -1,9 +1,4 @@
 > **Some parts (flags, +-event) are still missing, nearly not tested, some options have bugs**
->
-> Currently there is a serious deadlock in case you use mode `+32` and redirect output to a file, if this file is on a mount which is monitored by `fanotifier`.
-> In this case `fanotifier` blocks itself while trying to output data to the file.
-> To avoid this, use a file on some other mountpoint, for example in your "personal session-ramdisk" ``/run/user/`id -u`/``
-> A future version might repair this by using threads.
 
 
 # fanotifier
