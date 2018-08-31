@@ -838,6 +838,8 @@ emptyline(void)
     putchar('\n');
 }
 
+/* Gather all the important data from a PID
+ */
 static struct _pids *
 synthetic(PID_TYPE pid)
 {
