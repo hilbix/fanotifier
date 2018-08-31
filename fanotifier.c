@@ -17,6 +17,8 @@
 #include <sys/resource.h>
 #include <sys/fanotify.h>
 
+#include <pthread.h>
+
 #define	PID_TYPE	long
 #define	PID_FORMAT	"%ld"
 
@@ -83,8 +85,11 @@ static struct _modes
 static int	mode_disable, perm_disable, synth_disable;
 static PID_TYPE	pid_max;
 static unsigned	flags;
-static int	fa = -1;
+static volatile int	fa = -1;
 static const char *arg0;
+
+static pthread_mutex_t		write_mutex, queue_mutex;
+static pthread_cond_t		queue_cond;
 
 #define	PID_IGNORED	((struct _pids *)1)
 
@@ -152,7 +157,7 @@ vOOPS(int e, const char *s, va_list list, int nonfatal)
   if (!nonfatal && fa>=0)
     {
       close(fa);			/* just to be sure nothing hangs */
-      fa = -1;
+      fa = -1;				/* <- volatile because of this */
     }
 
   fprintf(stderr, "OOPS: ");
@@ -185,11 +190,18 @@ OOPS(const char *s, ...)
 static void
 WTF(const char *s, ...)
 {
-  va_list	list;
+  va_list      list;
 
   va_start(list, s);
   vOOPS(errno, s, list, 1);
   va_end(list);
+}
+
+static void
+OK(const char *what, int err)
+{
+  if (err)
+    OOPS("cannot %s: error code %d", what, err);
 }
 
 static void
@@ -463,6 +475,8 @@ ul2u(unsigned long ul)
   return u;
 }
 
+/* This is a variant of sprintf() which can allocate the buffer if it is passed as NULL.
+ */
 static const char *
 myvsnprintf(char *buf, size_t max, const char *format, va_list olist)
 {
@@ -493,7 +507,7 @@ myvsnprintf(char *buf, size_t max, const char *format, va_list olist)
       va_copy(list, olist);
       len = vsnprintf(buf, size, format, list);
       va_end(list);
-      
+
       if (len<0)
         FATAL("sprintf failed for format %s", format);
       if (len<size-1)
@@ -710,8 +724,8 @@ escape(const char *s)
       switch (c = *s++)
         {
         case 0:
-  	  while (spc--)
-  	    printf("\\40");
+          while (spc--)
+            printf("\\40");
           return;
 
         case ' ':
@@ -787,6 +801,62 @@ verbose(const char *ev, PID_TYPE pid, const char *s, ...)
   va_start(list, s);
   vev(ev, pid, s, list);
   va_end(list);
+}
+
+struct _Q
+  {
+    struct _Q	*next;
+    const char	*wtf;
+    PID_TYPE	pid;
+    int		fd;
+    uint64_t	mask;
+  };
+
+static struct _Q * volatile head;
+static struct _Q * volatile * volatile tail = &head;
+
+static struct _Q *
+FREE(struct _Q *ptr)
+{
+  struct _Q *ret;
+
+  ret	= ptr->next;
+  myfree(ptr->wtf);
+  myfree(ptr);
+  return ret;
+}
+
+static void
+WORK(const char *wtf, const struct fanotify_event_metadata *ptr)
+{
+  struct _Q	*q;
+
+  q		= alloc0(sizeof *q);
+  q->wtf	= wtf;
+  if (ptr)
+    {
+      q->pid	= ptr->pid;
+      q->fd	= ptr->fd;
+      q->mask	= ptr->mask;
+    }
+
+  OK("lock queue_lock", pthread_mutex_lock(&queue_mutex));
+  *tail		= q;
+  tail		= &q->next;
+  OK("unlock write_mutex", pthread_mutex_unlock(&queue_mutex));
+  pthread_cond_signal(&queue_cond);
+}
+
+static void
+Q(const char *format, ...)
+{
+  va_list	list;
+  const char	*buf;
+
+  va_start(list, format);
+  buf	= myvsnprintf(NULL, 0, format, list);
+  va_end(list);
+  WORK(buf, NULL);
 }
 
 static void
@@ -909,7 +979,19 @@ synthetic(PID_TYPE pid)
 }
 
 static void
-print_events(const struct fanotify_event_metadata *ptr)
+fanotify_allow(int fd)
+{
+  struct fanotify_response r;
+
+  OK("lock write_mutex", pthread_mutex_lock(&write_mutex));
+  r.fd		= fd;
+  r.response	= FAN_ALLOW;
+  mywrite(fa, &r, sizeof r);
+  OK("unlock write_mutex", pthread_mutex_unlock(&write_mutex));
+}
+
+static void
+print_events(const struct _Q *ptr)
 {
   char		fdname[32], name[PATH_MAX];
   int		len, have;
@@ -933,11 +1015,7 @@ print_events(const struct fanotify_event_metadata *ptr)
 
   if (ptr->mask & PERMS_ALL)
     {
-      struct fanotify_response r;
- 
-      r.fd		= ptr->fd;
-      r.response	= FAN_ALLOW;
-      mywrite(fa, &r, sizeof r);
+      fanotify_allow(ptr->fd);
 
       if (flags & FLAG_VERBOSE)
         print_event(SYNTHETIC_ALLOW, 0, "ALLOW", (PID_TYPE)ptr->pid, "%s", name);
@@ -970,6 +1048,7 @@ print_events(const struct fanotify_event_metadata *ptr)
     FATAL("STDOUT went away");
 }
 
+#if 0
 static int
 getmaxfdcount(void)
 {
@@ -978,74 +1057,122 @@ getmaxfdcount(void)
   getrlimit(RLIMIT_NOFILE, &lim);
   return lim.rlim_cur;
 }
+#endif
+
+static inline int
+pid_ignored(pid_t pid)
+{
+  return pid<0 || pid>=pid_max || pids[pid]==PID_IGNORED;
+}
+
+static void *
+receiver(void *input)
+{
+  for (;;)
+    {
+      struct fanotify_event_metadata		ev[1000];
+      struct fanotify_event_metadata const	*ptr;
+      int					len;
+
+      len = read(fa, ev, sizeof ev);
+      if (len<0)
+        switch (errno)
+          {
+          case EAGAIN:
+          case EINTR:
+            continue;
+
+          case EINVAL:	Q("event buffer too small (probably a progam bug");					continue;
+          case EMFILE:	Q("all file descriptors are used up, please increase ulimit -n");			continue;
+          case ENFILE:	Q("system ran out of file descriptors, please increase /proc/sys/fs/file-max");	continue;
+          case ENOENT:	Q("ignoring ENOENT");									continue;
+          case EACCES:	Q("ignoring EACCESS");								continue;
+          default:	Q("ignoring unknown error %d", errno);						continue;
+        }
+      if (!len)
+        {
+          Q("this should not happen: 0 bytes read from fanotify FD %d", fa);
+          continue;
+        }
+      for (ptr=ev; FAN_EVENT_OK(ptr, len);  ptr = FAN_EVENT_NEXT(ptr, len))
+        {
+          if (ptr->vers != FANOTIFY_METADATA_VERSION)
+            FATAL("fanotify communication error, version mismatch");
+
+          if (ptr->fd>=0 && pid_ignored(ptr->pid))	/* get the ignored PIDs out of the way	*/
+            {
+              fanotify_allow(ptr->fd);
+              myclose(ptr->fd);
+              continue;
+            }
+          WORK(NULL, ptr);
+        }
+    }
+  return NULL;
+}
+
+#if 0
+#endif
 
 static int
 monitor(void)
 {
-  struct fanotify_event_metadata	ev[1000];
-  struct fanotify_event_metadata const	*ptr;
-  int					len;
+  struct _Q *ptr;
 
-  if (chdir("/proc/self/fd"))
-    FATAL("cannot cd %s", "/proc/self/fd");
+  OK("lock queue_lock", pthread_mutex_lock(&queue_mutex));
+  while (!head)
+    OK("wait queue_cond", pthread_cond_wait(&queue_cond, &queue_mutex));
+  ptr	= head;
+  head	= 0;
+  tail	= &head;
+  OK("unlock queue_lock", pthread_mutex_unlock(&queue_mutex));
 
-  len = read(fa, ev, sizeof ev);
-  if (len<0)
-    switch (errno)
-      {
-      case EAGAIN:
-      case EINTR:
-        return 1;
-
-      case EINVAL:
-        WTF("event buffer too small (probably a progam bug)");
-        return 1;
-
-      case EMFILE:
-        WTF("all %d file descriptors are used up, please increase ulimit -n", getmaxfdcount());
-        return 1;
-
-      case ENFILE:
-        OOPS("system ran out of file descriptors, please increase /proc/sys/fs/file-max");
-        return 1;
-
-      /* sigh, it can return just anything	*/
-      case ENOENT:	WTF("ignoring ENOENT");	return 1;
-      case EACCES:	WTF("ignoring EACCES");	return 1;
-      default:		WTF("ignoring error");	return 1;
-    }
-  if (!len)
+  for (; ptr; ptr=FREE(ptr))
     {
-      OOPS("this should not happen: 0 bytes read from fanotify FD %d", fa);
-      return 1;
-    }
-
-  for (ptr=ev; FAN_EVENT_OK(ptr, len);  ptr = FAN_EVENT_NEXT(ptr, len))
-    {
-      if (ptr->vers != FANOTIFY_METADATA_VERSION)
-        FATAL("fanotify communication error, version mismatch");
-
-      if (ptr->fd<0)
+      if (ptr->wtf)
         {
-          print_event(0, FAN_Q_OVERFLOW, "OVERFLOW", (PID_TYPE)ptr->pid, NULL);
+          WTF("%s", ptr->wtf);
           continue;
         }
-      print_events(ptr);
+      if (ptr->fd<0)
+        {
+          print_event(0, FAN_Q_OVERFLOW, "OVERFLOW", ptr->pid, NULL);
+          continue;
+        }
+      print_events(ptr);	/* invokes fanotify_allow	*/
       myclose(ptr->fd);
+      oopses = 0;		/* oopses is a hack to prevent endless WTF loops */
     }
-  oopses = 0;	/* oopses is a hack to prevent endless WTF loops */
+
   return 1;
 }
 
 int
 main(int argc, const char * const *argv)
 {
+  pthread_t	mon;
+
   arg0 = argv[0];
   ignorepid((unsigned long)getpid());
   options(argv+1);
   if (fa<0)
     add_path(".");
+
+  if (chdir("/proc/self/fd"))
+    FATAL("cannot cd %s", "/proc/self/fd");
+
+  OK("create write mutex",		pthread_mutex_init(&write_mutex, NULL));
+  OK("create queue mutex",		pthread_mutex_init(&queue_mutex, NULL));
+  OK("create condition variable",	pthread_cond_init(&queue_cond, NULL));
+  OK("create monitoring thread",	pthread_create(&mon, NULL, receiver, NULL));
+
   while (monitor());
+
+  OK("cancel monitoring thread",	pthread_cancel(mon));
+  OK("join monitoring thread",		pthread_join(mon, NULL));
+
   myclose(fa);
+
   return 0;
 }
+

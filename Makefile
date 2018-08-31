@@ -2,6 +2,7 @@
 
 TARG=fanotifier
 CFLAGS=-Wall -O3 -g
+LDLIBS=-lpthread
 PREFIX=$(HOME)
 
 .PHONY: all install clean distclean
